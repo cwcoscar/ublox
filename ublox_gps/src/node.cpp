@@ -1193,21 +1193,26 @@ bool UbloxFirmware8::configureUblox() {
       correct = false;
       cfg_gnss.blocks[i].flags =
           (cfg_gnss.blocks[i].flags & ~block.FLAGS_ENABLE) | enable_imes_;
-    } else if (block.gnssId == block.GNSS_ID_QZSS
-               && (enable_qzss_ != (block.flags & block.FLAGS_ENABLE)
-               || (enable_qzss_
-               && qzss_sig_cfg_ != (block.flags & block.FLAGS_SIG_CFG_MASK)))) {
-      ROS_DEBUG("QZSS Configuration is different %u, %u",
-                block.flags & block.FLAGS_ENABLE,
-                enable_qzss_);
-      correct = false;
-      ROS_DEBUG("QZSS Configuration: %u", block.flags);
-      cfg_gnss.blocks[i].flags =
-          (cfg_gnss.blocks[i].flags & ~block.FLAGS_ENABLE) | enable_qzss_;
-      ROS_DEBUG("QZSS Configuration: %u", cfg_gnss.blocks[i].flags);
-      if (enable_qzss_)
-        // Only change sig cfg if enabling
-        cfg_gnss.blocks[i].flags |= qzss_sig_cfg_;
+    //cwc
+    /*
+    Fix the bug of lagging at the first beginning of running the code.
+    */
+    // } else if (block.gnssId == block.GNSS_ID_QZSS
+    //            && (enable_qzss_ != (block.flags & block.FLAGS_ENABLE)
+    //            || (enable_qzss_
+    //            && qzss_sig_cfg_ != (block.flags & block.FLAGS_SIG_CFG_MASK)))) {
+    //   ROS_DEBUG("QZSS Configuration is different %u, %u",
+    //             block.flags & block.FLAGS_ENABLE,
+    //             enable_qzss_);
+    //   correct = false;
+    //   ROS_DEBUG("QZSS Configuration: %u", block.flags);
+    //   cfg_gnss.blocks[i].flags =
+    //       (cfg_gnss.blocks[i].flags & ~block.FLAGS_ENABLE) | enable_qzss_;
+    //   ROS_DEBUG("QZSS Configuration: %u", cfg_gnss.blocks[i].flags);
+    //   if (enable_qzss_)
+    //     // Only change sig cfg if enabling
+    //     cfg_gnss.blocks[i].flags |= qzss_sig_cfg_;
+    //cwc
     } else if (block.gnssId == block.GNSS_ID_GLONASS
                && enable_glonass_ != (block.flags & block.FLAGS_ENABLE)) {
       correct = false;
@@ -1351,7 +1356,7 @@ void AdrUdrProduct::subscribe() {
   if (enabled["nav_att"])
     gps.subscribe<ublox_msgs::NavATT>(boost::bind(
         publish<ublox_msgs::NavATT>, _1, "navatt"), kSubscribeRate);
-
+        
   // Subscribe to ESF INS messages
   nh->param("publish/esf/ins", enabled["esf_ins"], enabled["esf"]);
   if (enabled["esf_ins"])
@@ -1399,55 +1404,96 @@ void AdrUdrProduct::callbackEsfMEAS(const ublox_msgs::EsfMEAS &m) {
     static const float rad_per_sec = pow(2, -12) * M_PI / 180.0F;
     static const float m_per_sec_sq = pow(2, -10);
     static const float deg_c = 1e-2;
+    // cwc
+    /*
+    flags for publish imu data
+    */
+    static bool gyro = false;
+    static bool acc = false;
+    // cwc
      
     std::vector<uint32_t> imu_data = m.data;
-    for (int i=0; i < imu_data.size(); i++){
-      unsigned int data_type = imu_data[i] >> 24; //grab the last six bits of data
-      int32_t data_value = static_cast<int32_t>(imu_data[i] << 8); //shift to extend sign from 24 to 32 bit integer
-      data_value >>= 8;
+      // cwc
+      /* 
+      Problem:
+      If publish function is in the for loop, there will be several message at the same time stamp with several idenical data.
+      
+      After observing the "data[]" in this topic, there are 3 conditions.
+      1st: one data in the array, and it's wheel tick
+      2nd: three data in the array, they are gyro data (time intervel is 0.05 sec)
+      3rd: four data in the array, they are acc data and temperature data (time intervel is 0.05 sec)
 
-      imu_.orientation_covariance[0] = -1;
-      imu_.linear_acceleration_covariance[0] = -1;
-      imu_.angular_velocity_covariance[0] = -1;
+      Only 2nd and 3rd message are what we are concerned.
+      Thus only if the array length is over 1, the message will be published.
 
-      if (data_type == 14) {
-          imu_.angular_velocity.x = data_value * rad_per_sec;
-      } else if (data_type == 16) {
-          imu_.linear_acceleration.x = data_value * m_per_sec_sq;
-      } else if (data_type == 13) {
-          imu_.angular_velocity.y = data_value * rad_per_sec;
-      } else if (data_type == 17) {
-          imu_.linear_acceleration.y = data_value * m_per_sec_sq;
-      } else if (data_type == 5) {
-          imu_.angular_velocity.z = data_value * rad_per_sec;
-      } else if (data_type == 18) {
-          imu_.linear_acceleration.z = data_value * m_per_sec_sq;
-      } else if (data_type == 12) {
-        //ROS_INFO("Temperature in celsius: %f", data_value * deg_c); 
-      } else {
-        // ROS_INFO("data_type: %u", data_type);
-        // ROS_INFO("data_value: %u", data_value);
-      }
+      Next, 2 flags are used to control the frequency of update rate on /ublox_f9k/imu_meas.
+      the message will be published only when accerometer and gyroscope are both updated.
 
-      // create time ref message and put in the data
-      //t_ref_.header.seq = m.risingEdgeCount;
-      //t_ref_.header.stamp = ros::Time::now();
-      //t_ref_.header.frame_id = frame_id;
+      The publishing rate of this topic will be approximately at 50 Hz.
 
-      //t_ref_.time_ref = ros::Time((m.wnR * 604800 + m.towMsR / 1000), (m.towMsR % 1000) * 1000000 + m.towSubMsR); 
+      If 2 flags are not used, the publishing rate of this topic will be approximately at 100 Hz. 
+    */
+    if(imu_data.size() > 1){
+    //cwc
+      for (int i=0; i < imu_data.size(); i++){
+        unsigned int data_type = imu_data[i] >> 24; //grab the last six bits of data
+        int32_t data_value = static_cast<int32_t>(imu_data[i] << 8); //shift to extend sign from 24 to 32 bit integer
+        data_value >>= 8;
+
+        imu_.orientation_covariance[0] = -1;
+        imu_.linear_acceleration_covariance[0] = -1;
+        imu_.angular_velocity_covariance[0] = -1;
+
+        if (data_type == 14) {
+            imu_.angular_velocity.x = data_value * rad_per_sec;
+            // cwc
+            gyro = true;
+            // cwc
+        } else if (data_type == 16) {
+            imu_.linear_acceleration.x = data_value * m_per_sec_sq;
+            // cwc
+            acc = true;
+            // cwc
+        } else if (data_type == 13) {
+            imu_.angular_velocity.y = data_value * rad_per_sec;
+        } else if (data_type == 17) {
+            imu_.linear_acceleration.y = data_value * m_per_sec_sq;
+        } else if (data_type == 5) {
+            imu_.angular_velocity.z = data_value * rad_per_sec;
+        } else if (data_type == 18) {
+            imu_.linear_acceleration.z = data_value * m_per_sec_sq;
+        } else if (data_type == 12) {
+          //ROS_INFO("Temperature in celsius: %f", data_value * deg_c); 
+        } else {
+          // ROS_INFO("data_type: %u", data_type);
+          // ROS_INFO("data_value: %u", data_value);
+        }
+
+        // create time ref message and put in the data
+        // t_ref_.header.seq = m.risingEdgeCount;
+        // t_ref_.header.stamp = ros::Time::now();
+        // t_ref_.header.frame_id = frame_id;
+
+        //t_ref_.time_ref = ros::Time((m.wnR * 604800 + m.towMsR / 1000), (m.towMsR % 1000) * 1000000 + m.towSubMsR); 
+      
+        //std::ostringstream src;
+        //src << "TIM" << int(m.ch); 
+        //t_ref_.source = src.str();
+
+        t_ref_.header.stamp = ros::Time::now(); // create a new timestamp
+        t_ref_.header.frame_id = frame_id;
     
-      //std::ostringstream src;
-      //src << "TIM" << int(m.ch); 
-      //t_ref_.source = src.str();
-
-      t_ref_.header.stamp = ros::Time::now(); // create a new timestamp
-      t_ref_.header.frame_id = frame_id;
-   
-      time_ref_pub.publish(t_ref_);
-      imu_pub.publish(imu_);
+        time_ref_pub.publish(t_ref_);
+        // imu_pub.publish(imu_);
+      }
+      // // cwc
+      // if (acc == true && gyro == true){
+        imu_pub.publish(imu_);
+      //   acc = gyro = false;
+      // }
+      // // cwc
     }
   }
-  
   updater->force_update();
 }
 //
